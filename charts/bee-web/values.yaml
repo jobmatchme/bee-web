@@ -18,6 +18,8 @@ pod:
 container:
   name: ""
   port: 4322
+  runAsUser: 1000
+  runAsGroup: 1000
   readOnlyRootFilesystem: false
 
 config:

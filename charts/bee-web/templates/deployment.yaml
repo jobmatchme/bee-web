@@ -48,6 +48,8 @@ spec:
               path: /health
               port: http
           securityContext:
+            runAsUser: {{ .Values.container.runAsUser }}
+            runAsGroup: {{ .Values.container.runAsGroup }}
             runAsNonRoot: true
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: {{ .Values.container.readOnlyRootFilesystem }}
