@@ -1,5 +1,8 @@
+import { createReadStream } from "fs";
+import { stat } from "fs/promises";
 import type { IncomingMessage, ServerResponse } from "http";
 import { createServer } from "http";
+import { basename, extname, join, resolve } from "path";
 import { DEFAULT_EMAIL_HEADERS, getAuthenticatedWebUser } from "./auth.js";
 import { createWebSession, findRoute, getRouteHistoryAgentId, isUserScopedRoute, toPublicRoute } from "./router.js";
 import { SseFanout } from "./sse.js";
@@ -20,6 +23,17 @@ interface MessageBody {
 	routeId?: string;
 	operatorId?: string;
 	text?: string;
+}
+
+export interface RegisteredArtifact {
+	id: string;
+	blobKey?: string;
+	name?: string;
+	title?: string;
+	mimeType?: string;
+	uri?: string;
+	sizeBytes?: number;
+	createdAt?: string;
 }
 
 export interface WebMessageRequest {
@@ -120,6 +134,37 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 	res.end(JSON.stringify(body));
 }
 
+function parseDataUri(uri: string): { mimeType?: string; data: Buffer } | undefined {
+	const match = /^data:([^;,]*)(;base64)?,(.*)$/s.exec(uri);
+	if (!match) return undefined;
+	return {
+		mimeType: match[1] || undefined,
+		data: match[2] ? Buffer.from(match[3] || "", "base64") : Buffer.from(decodeURIComponent(match[3] || ""), "utf8"),
+	};
+}
+
+function extensionForMimeType(mimeType?: string): string {
+	if (mimeType === "text/csv") return ".csv";
+	if (mimeType === "application/json") return ".json";
+	if (mimeType === "text/html") return ".html";
+	if (mimeType === "application/pdf") return ".pdf";
+	return "";
+}
+
+function artifactFilename(artifact: RegisteredArtifact): string {
+	const raw = artifact.name || artifact.title || artifact.id;
+	const filename = basename(raw).replace(/[^a-zA-Z0-9._-]+/g, "_") || artifact.id;
+	return extname(filename) ? filename : `${filename}${extensionForMimeType(artifact.mimeType)}`;
+}
+
+function attachmentHeaders(artifact: RegisteredArtifact, contentLength?: number): Record<string, string | number> {
+	return {
+		"content-type": artifact.mimeType || "application/octet-stream",
+		"content-disposition": `attachment; filename="${artifactFilename(artifact).replace(/"/g, "")}"`,
+		...(contentLength !== undefined ? { "content-length": contentLength } : {}),
+	};
+}
+
 function matchSessionEndpoint(
 	pathname: string,
 ): { sessionId: string; action: "events" | "messages" | "cancel" } | null {
@@ -128,6 +173,15 @@ function matchSessionEndpoint(
 	return {
 		sessionId: decodeURIComponent(match[1]!),
 		action: match[2] as "events" | "messages" | "cancel",
+	};
+}
+
+function matchArtifactEndpoint(pathname: string): { sessionId: string; artifactId: string } | null {
+	const match = /^\/api\/sessions\/([^/]+)\/artifacts\/([^/]+)\/download$/.exec(pathname);
+	if (!match) return null;
+	return {
+		sessionId: decodeURIComponent(match[1]!),
+		artifactId: decodeURIComponent(match[2]!),
 	};
 }
 
@@ -191,8 +245,54 @@ function assertSessionAccess(
 	}
 }
 
+async function sendArtifact(
+	config: WebGatewayConfig,
+	artifact: RegisteredArtifact,
+	res: ServerResponse,
+): Promise<void> {
+	if (artifact.uri) {
+		if (!artifact.uri.startsWith("data:")) {
+			res.writeHead(302, { location: artifact.uri });
+			res.end();
+			return;
+		}
+
+		const parsed = parseDataUri(artifact.uri);
+		if (!parsed) {
+			sendJson(res, 404, { error: "Artifact payload not available" });
+			return;
+		}
+		const withMime = { ...artifact, mimeType: artifact.mimeType || parsed.mimeType };
+		res.writeHead(200, attachmentHeaders(withMime, parsed.data.byteLength));
+		res.end(parsed.data);
+		return;
+	}
+
+	if (!artifact.blobKey || !config.artifactStore?.rootDir) {
+		sendJson(res, 404, { error: "Artifact payload not available" });
+		return;
+	}
+
+	const root = resolve(config.artifactStore.rootDir);
+	const path = resolve(join(root, artifact.blobKey));
+	if (!path.startsWith(`${root}/`) && path !== root) {
+		sendJson(res, 400, { error: "Invalid artifact path" });
+		return;
+	}
+
+	const details = await stat(path);
+	res.writeHead(200, attachmentHeaders(artifact, details.size));
+	createReadStream(path).pipe(res);
+}
+
 export function createWebGatewayServer(config: WebGatewayConfig, options: CreateWebGatewayServerOptions = {}) {
 	const fanout = options.fanout ?? new SseFanout();
+	const artifacts = new Map<string, RegisteredArtifact>();
+	const artifactKey = (sessionId: string, artifactId: string) => `${sessionId}\0${artifactId}`;
+	const registerArtifact = (sessionId: string, artifact: RegisteredArtifact): void => {
+		const key = artifactKey(sessionId, artifact.id);
+		artifacts.set(key, { ...artifacts.get(key), ...artifact });
+	};
 	const server = createServer(async (req, res) => {
 		applyCors(config, req, res);
 
@@ -287,6 +387,32 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 			return;
 		}
 
+		const artifactEndpoint = matchArtifactEndpoint(pathname);
+		if (method === "GET" && artifactEndpoint) {
+			const sessionRoute = findRouteBySessionId(config, artifactEndpoint.sessionId);
+			if (sessionRoute) {
+				try {
+					assertSessionAccess(config, req, sessionRoute, artifactEndpoint.sessionId);
+				} catch (error) {
+					sendJson(res, 404, { error: error instanceof Error ? error.message : String(error) });
+					return;
+				}
+			}
+
+			const artifact = artifacts.get(artifactKey(artifactEndpoint.sessionId, artifactEndpoint.artifactId));
+			if (!artifact) {
+				sendJson(res, 404, { error: "Artifact not found" });
+				return;
+			}
+
+			try {
+				await sendArtifact(config, artifact, res);
+			} catch (error) {
+				sendJson(res, 404, { error: error instanceof Error ? error.message : String(error) });
+			}
+			return;
+		}
+
 		const sessionEndpoint = matchSessionEndpoint(pathname);
 		if (sessionEndpoint) {
 			const sessionRoute = findRouteBySessionId(config, sessionEndpoint.sessionId);
@@ -366,5 +492,5 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 		sendJson(res, 404, { error: "Not found" });
 	});
 
-	return { server, config, fanout };
+	return { server, config, fanout, registerArtifact };
 }

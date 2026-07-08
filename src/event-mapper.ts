@@ -6,6 +6,7 @@ type DashboardItemPart =
 	| {
 			kind: "artifactRef";
 			artifactId: string;
+			blobKey?: string;
 			name?: string;
 			title?: string;
 			mimeType?: string;
@@ -16,6 +17,7 @@ type DashboardItemPart =
 
 export interface ArtifactMeta {
 	id: string;
+	blobKey?: string;
 	name?: string;
 	title?: string;
 	mimeType?: string;
@@ -183,6 +185,7 @@ function mapPartsToDashboardEvents(input: {
 				turnId: input.event.turnId,
 				artifact: {
 					id: part.artifactId,
+					blobKey: part.blobKey,
 					name: part.name,
 					title: part.title,
 					mimeType: part.mimeType,
@@ -265,6 +268,7 @@ function getItemParts(value: unknown): DashboardItemPart[] {
 				parts.push({
 					kind,
 					artifactId,
+					blobKey: getStringObjectValue(part, "blobKey"),
 					name: getStringObjectValue(part, "name"),
 					title: getStringObjectValue(part, "title"),
 					mimeType: getStringObjectValue(part, "mimeType"),

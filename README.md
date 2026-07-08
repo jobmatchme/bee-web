@@ -66,6 +66,7 @@ POST /api/sessions
 GET  /api/sessions/:sessionId/events
 POST /api/sessions/:sessionId/messages
 POST /api/sessions/:sessionId/cancel
+GET  /api/sessions/:sessionId/artifacts/:artifactId/download
 GET  /api/history/sessions
 GET  /api/history/sessions/:sessionId
 GET  /api/history/sessions/:sessionId/runs
@@ -90,6 +91,5 @@ Not included yet:
 
 - database persistence
 - first-party login flow
-- artifact downloads
 - file uploads
 - SSE replay after reload
