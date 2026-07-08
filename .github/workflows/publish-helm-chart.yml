@@ -1,0 +1,54 @@
+name: Publish OCI Helm Chart
+
+on:
+  workflow_run:
+    workflows:
+      - Publish GHCR image
+    types:
+      - completed
+
+env:
+  REGISTRY: ghcr.io
+  CHART_DIR: charts/bee-web
+
+jobs:
+  publish:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lowercase repository owner
+        id: owner
+        shell: bash
+        run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "${GITHUB_OUTPUT}"
+
+      - name: Read package version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "value=$(node -p 'require("./package.json").version')" >> "${GITHUB_OUTPUT}"
+
+      - name: Lint chart
+        run: helm lint "${CHART_DIR}"
+
+      - name: Package chart
+        run: helm package "${CHART_DIR}" --version "${{ steps.version.outputs.value }}" --app-version "${{ steps.version.outputs.value }}"
+
+      - name: Log in to GHCR
+        shell: bash
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login "${REGISTRY}" -u "${{ github.actor }}" --password-stdin
+
+      - name: Push chart
+        run: helm push "bee-web-${{ steps.version.outputs.value }}.tgz" "oci://${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/helm-charts"
