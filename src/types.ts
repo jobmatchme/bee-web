@@ -29,6 +29,10 @@ export interface WebHistoryConfig {
 	defaultLimit?: number;
 }
 
+export interface WebArtifactStoreConfig {
+	rootDir?: string;
+}
+
 export interface WebGatewayConfig {
 	port: number;
 	host: string;
@@ -37,6 +41,7 @@ export interface WebGatewayConfig {
 	cors?: WebCorsConfig;
 	auth?: WebAuthConfig;
 	history?: WebHistoryConfig;
+	artifactStore?: WebArtifactStoreConfig;
 }
 
 export interface PublicWebRoute {

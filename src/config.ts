@@ -53,5 +53,8 @@ export function loadConfig(configPath?: string): WebGatewayConfig {
 			bearerToken: readStringEnv("BEE_WEB_HISTORY_API_BEARER_TOKEN") ?? config.history?.bearerToken,
 			defaultLimit: readPositiveIntEnv("BEE_WEB_HISTORY_API_DEFAULT_LIMIT") ?? config.history?.defaultLimit ?? 50,
 		},
+		artifactStore: {
+			rootDir: readStringEnv("BEE_WEB_ARTIFACT_STORE_ROOT") ?? config.artifactStore?.rootDir,
+		},
 	};
 }

@@ -30,7 +30,7 @@ export async function startWebGatewayFromEnv(configPath?: string): Promise<void>
 	const sessionQueues = new Map<string, Promise<void>>();
 	const activeRuns = new Map<string, ActiveRun>();
 
-	const { server } = createWebGatewayServer(config, {
+	const gateway = createWebGatewayServer(config, {
 		fanout,
 		history: historyClient
 			? {
@@ -96,6 +96,9 @@ export async function startWebGatewayFromEnv(configPath?: string): Promise<void>
 						},
 						(event: BeeRunEvent) => {
 							for (const dashboardEvent of mapBeeEventToDashboardEvents(event)) {
+								if (dashboardEvent.type === "artifact.created") {
+									gateway.registerArtifact(sessionId, dashboardEvent.artifact);
+								}
 								fanout.broadcast(sessionId, dashboardEvent.type, dashboardEvent);
 							}
 						},
@@ -136,6 +139,7 @@ export async function startWebGatewayFromEnv(configPath?: string): Promise<void>
 			return { cancelled: true };
 		},
 	});
+	const { server } = gateway;
 
 	server.once("close", () => {
 		void workerClient.close?.();

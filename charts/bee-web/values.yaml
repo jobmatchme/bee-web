@@ -52,6 +52,8 @@ config:
     defaultLimit: 50
     bearerTokenSecretName: ""
     bearerTokenSecretKey: ""
+  artifactStore:
+    rootDir: ""
 
 service:
   type: ClusterIP
