@@ -1,0 +1,9 @@
+apiVersion: v2
+name: bee-web
+description: Web gateway for Bee Dashboard and Bee Dance agents
+type: application
+home: https://github.com/jobmatchme/bee-web
+sources:
+  - https://github.com/jobmatchme/bee-web
+version: 0.1.0
+appVersion: "0.1.0"

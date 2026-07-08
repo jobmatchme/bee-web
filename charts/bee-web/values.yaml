@@ -1,0 +1,67 @@
+nameOverride: ""
+
+image:
+  repository: ghcr.io/jobmatchme/bee-web
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecretName: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+pod:
+  replicas: 1
+  externalEgress: true
+  fsGroup: 1000
+
+container:
+  name: ""
+  port: 4322
+  readOnlyRootFilesystem: false
+
+config:
+  mountPath: /config
+  fileName: config.json
+  host: 0.0.0.0
+  nats:
+    servers: nats://nats:4222
+    name: bee-web
+  routes:
+    - id: example
+      label: Example
+      description: Example Bee worker
+      worker:
+        subject: bee.agent.example
+        timeoutMs: 600000
+        eventTimeoutMs: 600000
+      session:
+        agentId: example-agent
+        userScoped: true
+  cors:
+    origins:
+      - "*"
+  auth:
+    emailHeaders:
+      - x-forwarded-email
+      - x-auth-request-email
+  history:
+    baseUrl: ""
+    defaultLimit: 50
+    bearerTokenSecretName: ""
+    bearerTokenSecretKey: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources: {}
+
+ingress:
+  enabled: false
+  className: traefik
+  host: ""
+  path: /
+  pathType: Prefix
+  annotations: {}
+  tls: true
