@@ -1,0 +1,35 @@
+{
+	"port": 4322,
+	"host": "127.0.0.1",
+	"nats": {
+		"servers": "nats://127.0.0.1:4222",
+		"name": "bee-web-local"
+	},
+	"routes": [
+		{
+			"id": "fabee",
+			"label": "Fabee",
+			"description": "Fabee BI/dbt Agent",
+			"worker": {
+				"subject": "fabee.agent.pi.default",
+				"timeoutMs": 120000,
+				"eventTimeoutMs": 120000
+			},
+			"session": {
+				"agentId": "fabee-pi-agent",
+				"userScoped": true
+			}
+		}
+	],
+	"cors": {
+		"origins": ["http://localhost:5173"]
+	},
+	"auth": {
+		"emailHeaders": ["x-forwarded-email", "x-auth-request-email"]
+	},
+	"history": {
+		"baseUrl": "http://127.0.0.1:8080",
+		"bearerToken": "dev-token",
+		"defaultLimit": 50
+	}
+}

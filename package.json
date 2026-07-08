@@ -1,0 +1,54 @@
+{
+	"name": "@jobmatchme/bee-web",
+	"version": "0.1.0",
+	"description": "Web adapter for Bee Gate and the Bee Dance protocol",
+	"type": "module",
+	"bin": {
+		"bee-web": "dist/main.js"
+	},
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"private": true,
+	"keywords": [
+		"web",
+		"agents",
+		"gateway",
+		"protocol",
+		"nats"
+	],
+	"files": [
+		"dist",
+		"LICENSE",
+		"README.md"
+	],
+	"scripts": {
+		"clean": "shx rm -rf coverage dist",
+		"build": "tsgo -p tsconfig.build.json && shx chmod +x dist/main.js",
+		"dev": "tsx watch src/main.ts",
+		"lint": "biome check --error-on-warnings .",
+		"lint:fix": "biome check --write --error-on-warnings .",
+		"format": "biome format --write .",
+		"typecheck": "tsgo --noEmit -p tsconfig.json",
+		"test": "node --import tsx --test src/**/*.test.ts",
+		"check": "biome check --write --error-on-warnings . && tsgo --noEmit -p tsconfig.json && npm run test && npm run build"
+	},
+	"dependencies": {
+		"@jobmatchme/bee-gate": "file:../bee-gate",
+		"nats": "^2.29.3"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@types/node": "^24.3.0",
+		"@typescript/native-preview": "7.0.0-dev.20260120.1",
+		"shx": "^0.4.0",
+		"tsx": "^4.20.5",
+		"typescript": "^5.7.3"
+	},
+	"optionalDependencies": {
+		"@typescript/native-preview-linux-arm64": "7.0.0-dev.20260120.1"
+	},
+	"engines": {
+		"node": ">=20.0.0"
+	},
+	"license": "MIT"
+}
