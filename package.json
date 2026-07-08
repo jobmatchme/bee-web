@@ -33,7 +33,7 @@
 		"check": "biome check --write --error-on-warnings . && tsgo --noEmit -p tsconfig.json && npm run test && npm run build"
 	},
 	"dependencies": {
-		"@jobmatchme/bee-gate": "file:../bee-gate",
+		"@jobmatchme/bee-gate": "0.1.8",
 		"nats": "^2.29.3"
 	},
 	"devDependencies": {

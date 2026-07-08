@@ -1,0 +1,10 @@
+node_modules
+dist
+coverage
+.git
+.github
+.env
+.envrc
+local.config.json
+.DS_Store
+*.log
