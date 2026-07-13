@@ -10,6 +10,8 @@ spec:
       app.kubernetes.io/name: {{ include "bee-web.name" . }}
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
         app.kubernetes.io/name: {{ include "bee-web.name" . }}
         ai.jobmatch.me/external-egress: {{ ternary "true" "false" .Values.pod.externalEgress | quote }}
