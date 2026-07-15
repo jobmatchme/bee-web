@@ -70,6 +70,19 @@ test("artifact download returns registered data URI payload", async (t) => {
 	assert.equal(response.headers.get("content-type"), "text/csv");
 	assert.match(response.headers.get("content-disposition") ?? "", /briefing\.csv/);
 	assert.equal(await response.text(), "company,value\n");
+
+	registerArtifact(created.session.id, {
+		id: "artifact-external",
+		name: "external.csv",
+		mimeType: "text/csv",
+		uri: "https://example.com/external.csv",
+	});
+	const externalResponse = await fetch(
+		`http://127.0.0.1:${address.port}/api/sessions/${encodeURIComponent(created.session.id)}/artifacts/artifact-external/download`,
+		{ headers: { "x-forwarded-email": "alice@jobmatch.me" }, redirect: "manual" },
+	);
+	assert.equal(externalResponse.status, 404);
+	assert.equal(externalResponse.headers.get("location"), null);
 });
 
 test("message enqueue uses server-owned route and authenticated actor", async (t) => {

@@ -255,8 +255,7 @@ async function sendArtifact(
 ): Promise<void> {
 	if (artifact.uri) {
 		if (!artifact.uri.startsWith("data:")) {
-			res.writeHead(302, { location: artifact.uri });
-			res.end();
+			sendJson(res, 404, { error: "Artifact payload not available" });
 			return;
 		}
 
