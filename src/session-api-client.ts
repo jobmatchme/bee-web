@@ -1,4 +1,3 @@
-import type { AuthenticatedWebUser } from "./auth.js";
 import type { WebSessionRecord } from "./types.js";
 
 export class SessionApiError extends Error {
@@ -17,6 +16,7 @@ export interface SharedDeskSessionApiOptions {
 
 export interface SharedDeskSessionDetail {
 	sessionId: string;
+	conversationId?: string;
 	metadata?: { routeId?: string; createdAt?: string };
 	owner: string;
 	collaborators?: string[];
@@ -38,7 +38,6 @@ export interface SharedDeskSessionApi {
 	createSession(owner: string): Promise<WebSessionRecord>;
 	listSessions(actorEmail: string, limit: number): Promise<SharedDeskSessionList>;
 	getSession(sessionId: string, actorEmail: string): Promise<SharedDeskSessionDetail>;
-	requireSessionAccess(sessionId: string, actorEmail: string): Promise<WebSessionRecord>;
 	getCapabilities(
 		sessionId: string,
 		actorEmail: string,
@@ -52,7 +51,7 @@ export interface SharedDeskSessionApi {
 export function toWebSessionRecord(session: SharedDeskSessionDetail): WebSessionRecord {
 	return {
 		id: session.sessionId,
-		conversationId: session.sessionId,
+		conversationId: session.conversationId || session.sessionId,
 		routeId: session.metadata?.routeId || "fabee",
 		createdAt: session.metadata?.createdAt || new Date().toISOString(),
 	};
@@ -87,10 +86,6 @@ export class SharedDeskSessionApiClient implements SharedDeskSessionApi {
 		url.searchParams.set("actorEmail", actorEmail);
 		const body = await this.request<{ session: SharedDeskSessionDetail }>(url);
 		return body.session;
-	}
-
-	async requireSessionAccess(sessionId: string, actorEmail: string): Promise<WebSessionRecord> {
-		return toWebSessionRecord(await this.getSession(sessionId, actorEmail));
 	}
 
 	async getCapabilities(
@@ -154,8 +149,4 @@ export class SharedDeskSessionApiClient implements SharedDeskSessionApi {
 		const body = (await response.json().catch(() => null)) as { error?: string } | null;
 		return new SessionApiError(body?.error || `Session API request failed (${response.status})`, response.status);
 	}
-}
-
-export function actorFromUser(user: AuthenticatedWebUser): string {
-	return user.email;
 }

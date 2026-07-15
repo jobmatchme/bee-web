@@ -170,10 +170,12 @@ test("session API conversation id is authoritative for messages", async (t) => {
 				return { owned: [], shared: [] };
 			},
 			async getSession() {
-				return { sessionId: "ses_1", metadata: { routeId: "fabee", createdAt: "now" }, owner: "alice@jobmatch.me" };
-			},
-			async requireSessionAccess() {
-				return { id: "ses_1", conversationId: "conv_authoritative", routeId: "fabee", createdAt: "now" };
+				return {
+					sessionId: "ses_1",
+					conversationId: "conv_authoritative",
+					metadata: { routeId: "fabee", createdAt: "now" },
+					owner: "alice@jobmatch.me",
+				};
 			},
 			async getCapabilities() {
 				return {};

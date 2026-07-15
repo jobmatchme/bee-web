@@ -5,7 +5,7 @@ import { createServer } from "http";
 import { basename, extname, join, resolve } from "path";
 import { DEFAULT_EMAIL_HEADERS, deriveUserKeyFromEmail, getAuthenticatedWebUser } from "./auth.js";
 import { createWebSession, findRoute, toPublicRoute } from "./router.js";
-import { SessionApiError, type SharedDeskSessionApi } from "./session-api-client.js";
+import { SessionApiError, type SharedDeskSessionApi, toWebSessionRecord } from "./session-api-client.js";
 import { SseFanout } from "./sse.js";
 import type {
 	HistoryRunRecord,
@@ -298,15 +298,17 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 	};
 	const requireSession = async (sessionId: string, req: IncomingMessage) => {
 		const user = requireAuthenticatedUser(config, req);
-		const session = options.sessionApi
-			? await options.sessionApi.requireSessionAccess(sessionId, user.email)
-			: sessions.get(sessionId)?.session;
-		if (!session || (!options.sessionApi && sessions.get(sessionId)?.userKey !== user.userKey)) {
+		const upstreamSession = options.sessionApi
+			? await options.sessionApi.getSession(sessionId, user.email)
+			: undefined;
+		const localSession = sessions.get(sessionId);
+		const session = upstreamSession ? toWebSessionRecord(upstreamSession) : localSession?.session;
+		if (!session || (!options.sessionApi && localSession?.userKey !== user.userKey)) {
 			throw new SessionApiError("Session not found", 404);
 		}
 		const route = findRoute(config, session.routeId);
 		if (!route) throw new SessionApiError("Session not found", 404);
-		return { session, route, user };
+		return { session, upstreamSession, route, user };
 	};
 	const server = createServer(async (req, res) => {
 		applyCors(config, req, res);
@@ -484,16 +486,7 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 			}
 
 			if (method === "GET" && sessionEndpoint.action === "detail") {
-				if (options.sessionApi) {
-					try {
-						const session = await options.sessionApi.getSession(sessionEndpoint.sessionId, access.user.email);
-						sendJson(res, 200, { session });
-					} catch (error) {
-						sendJson(res, errorStatus(error, 404), { error: errorMessage(error) });
-					}
-					return;
-				}
-				sendJson(res, 200, { session: access.session });
+				sendJson(res, 200, { session: access.upstreamSession ?? access.session });
 				return;
 			}
 
@@ -559,7 +552,7 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 					return;
 				}
 				try {
-					const before = await options.sessionApi.getSession(sessionEndpoint.sessionId, access.user.email);
+					const before = access.upstreamSession!;
 					const session = await options.sessionApi.putCollaborators(
 						sessionEndpoint.sessionId,
 						access.user.email,

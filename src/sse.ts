@@ -42,7 +42,7 @@ export function writeSseComment(res: ServerResponse, comment: string): void {
 }
 
 export class SseFanout {
-	private clientsByUserSession = new Map<string, Set<SseClient>>();
+	private clientsBySession = new Map<string, Set<SseClient>>();
 	private snapshots = new Map<string, LiveSnapshot>();
 	private heartbeatMs: number;
 
@@ -61,11 +61,10 @@ export class SseFanout {
 			res,
 		};
 
-		const key = this.clientKey(sessionId, userKey);
-		let clients = this.clientsByUserSession.get(key);
+		let clients = this.clientsBySession.get(sessionId);
 		if (!clients) {
 			clients = new Set<SseClient>();
-			this.clientsByUserSession.set(key, clients);
+			this.clientsBySession.set(sessionId, clients);
 		}
 		clients.add(client);
 
@@ -145,16 +144,15 @@ export class SseFanout {
 		}
 
 		let delivered = 0;
-		for (const [key, clients] of this.clientsByUserSession) {
-			if (!key.startsWith(`${sessionId}\0`)) continue;
-			for (const client of [...clients]) {
-				if (client.res.writableEnded || client.res.destroyed) {
-					this.removeClient(client);
-					continue;
-				}
-				writeSseEvent(client.res, type, data);
-				delivered += 1;
+		const clients = this.clientsBySession.get(sessionId);
+		if (!clients) return delivered;
+		for (const client of [...clients]) {
+			if (client.res.writableEnded || client.res.destroyed) {
+				this.removeClient(client);
+				continue;
 			}
+			writeSseEvent(client.res, type, data);
+			delivered += 1;
 		}
 		return delivered;
 	}
@@ -165,17 +163,18 @@ export class SseFanout {
 
 	clientCount(sessionId?: string): number {
 		let count = 0;
-		for (const [key, clients] of this.clientsByUserSession) {
-			if (!sessionId || key.startsWith(`${sessionId}\0`)) count += clients.size;
+		for (const [clientSessionId, clients] of this.clientsBySession) {
+			if (!sessionId || clientSessionId === sessionId) count += clients.size;
 		}
 		return count;
 	}
 
 	closeUserSession(sessionId: string, userKey: string): number {
-		const clients = this.clientsByUserSession.get(this.clientKey(sessionId, userKey));
+		const clients = this.clientsBySession.get(sessionId);
 		if (!clients) return 0;
 		let closed = 0;
 		for (const client of [...clients]) {
+			if (client.userKey !== userKey) continue;
 			client.res.end();
 			this.removeClient(client);
 			closed += 1;
@@ -185,26 +184,20 @@ export class SseFanout {
 
 	closeSession(sessionId: string): number {
 		let closed = 0;
-		for (const [key, clients] of [...this.clientsByUserSession]) {
-			if (!key.startsWith(`${sessionId}\0`)) continue;
-			for (const client of [...clients]) {
-				client.res.end();
-				this.removeClient(client);
-				closed += 1;
-			}
+		const clients = this.clientsBySession.get(sessionId);
+		if (!clients) return closed;
+		for (const client of [...clients]) {
+			client.res.end();
+			this.removeClient(client);
+			closed += 1;
 		}
 		return closed;
 	}
 
-	private clientKey(sessionId: string, userKey: string): string {
-		return `${sessionId}\0${userKey}`;
-	}
-
 	private removeClient(client: SseClient): void {
-		const key = this.clientKey(client.sessionId, client.userKey);
-		const clients = this.clientsByUserSession.get(key);
+		const clients = this.clientsBySession.get(client.sessionId);
 		if (!clients) return;
 		clients.delete(client);
-		if (clients.size === 0) this.clientsByUserSession.delete(key);
+		if (clients.size === 0) this.clientsBySession.delete(client.sessionId);
 	}
 }
