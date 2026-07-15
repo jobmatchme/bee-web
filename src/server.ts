@@ -20,6 +20,10 @@ interface MessageBody {
 	text?: string;
 }
 
+interface CreateSessionBody {
+	routeId?: string;
+}
+
 interface CollaboratorsBody {
 	collaborators?: string[];
 }
@@ -298,14 +302,18 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 	};
 	const requireSession = async (sessionId: string, req: IncomingMessage) => {
 		const user = requireAuthenticatedUser(config, req);
+		const localSession = sessions.get(sessionId);
+		if (localSession) {
+			if (localSession.userKey !== user.userKey) throw new SessionApiError("Session not found", 404);
+			const route = findRoute(config, localSession.session.routeId);
+			if (!route) throw new SessionApiError("Session not found", 404);
+			return { session: localSession.session, upstreamSession: undefined, route, user };
+		}
 		const upstreamSession = options.sessionApi
 			? await options.sessionApi.getSession(sessionId, user.email)
 			: undefined;
-		const localSession = sessions.get(sessionId);
-		const session = upstreamSession ? toWebSessionRecord(upstreamSession) : localSession?.session;
-		if (!session || (!options.sessionApi && localSession?.userKey !== user.userKey)) {
-			throw new SessionApiError("Session not found", 404);
-		}
+		const session = upstreamSession ? toWebSessionRecord(upstreamSession) : undefined;
+		if (!session || session.routeId !== "fabee") throw new SessionApiError("Session not found", 404);
 		const route = findRoute(config, session.routeId);
 		if (!route) throw new SessionApiError("Session not found", 404);
 		return { session, upstreamSession, route, user };
@@ -333,8 +341,7 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 		}
 
 		if (method === "GET" && pathname === "/api/routes") {
-			const routes = options.sessionApi ? config.routes.filter((route) => route.id === "fabee") : config.routes;
-			sendJson(res, 200, { routes: routes.map(toPublicRoute) });
+			sendJson(res, 200, { routes: config.routes.map(toPublicRoute) });
 			return;
 		}
 
@@ -342,18 +349,19 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 			try {
 				const user = requireAuthenticatedUser(config, req);
 				const limit = getHistoryLimit(config, req);
-				if (options.sessionApi) {
-					sendJson(res, 200, await options.sessionApi.listSessions(user.email, limit));
-					return;
-				}
-				const owned = [...sessions.values()]
+				const localOwned = [...sessions.values()]
 					.filter((item) => item.userKey === user.userKey)
 					.map((item) => ({
 						sessionId: item.session.id,
 						routeId: item.session.routeId,
 						metadata: { routeId: item.session.routeId, createdAt: item.session.createdAt },
 					}));
-				sendJson(res, 200, { owned, shared: [] });
+				if (options.sessionApi) {
+					const upstream = await options.sessionApi.listSessions(user.email, limit);
+					sendJson(res, 200, { owned: [...localOwned, ...(upstream.owned ?? [])], shared: upstream.shared ?? [] });
+					return;
+				}
+				sendJson(res, 200, { owned: localOwned, shared: [] });
 			} catch (error) {
 				sendJson(res, errorStatus(error), { error: errorMessage(error) });
 			}
@@ -363,12 +371,15 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 		if (method === "POST" && pathname === "/api/sessions") {
 			try {
 				const user = requireAuthenticatedUser(config, req);
-				const route = options.sessionApi ? findRoute(config, "fabee") : firstRoute(config);
-				if (!route) throw new Error("Fabee route is not configured");
-				const session = options.sessionApi
-					? await options.sessionApi.createSession(user.email)
-					: createWebSession(route, user);
-				sessions.set(session.id, { session, userKey: user.userKey });
+				const body = (await readJsonBody<CreateSessionBody>(req).catch(() => null)) ?? {};
+				const route = body.routeId ? findRoute(config, body.routeId) : firstRoute(config);
+				if (!route) throw new SessionApiError("Route not found", 404);
+				const session =
+					options.sessionApi && route.id === "fabee"
+						? await options.sessionApi.createSession(user.email)
+						: createWebSession(route, user);
+				if (!(options.sessionApi && route.id === "fabee"))
+					sessions.set(session.id, { session, userKey: user.userKey });
 				sendJson(res, 201, { session });
 			} catch (error) {
 				sendJson(res, errorStatus(error, 401), { error: errorMessage(error) });
@@ -419,7 +430,7 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 				return;
 			}
 
-			if (options.sessionApi) {
+			if (access.upstreamSession && options.sessionApi) {
 				try {
 					const upstream = await options.sessionApi.fetchArtifact(
 						artifactEndpoint.sessionId,
@@ -535,7 +546,7 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 			}
 
 			if (method === "PUT" && sessionEndpoint.action === "collaborators") {
-				if (!options.sessionApi) {
+				if (!access.upstreamSession || !options.sessionApi) {
 					sendJson(res, 404, { error: "Session not found" });
 					return;
 				}
@@ -570,9 +581,16 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 			}
 
 			if (method === "POST" && sessionEndpoint.action === "archive") {
-				if (!options.sessionApi || options.canArchive?.(sessionEndpoint.sessionId) === false) {
-					sendJson(res, options.sessionApi ? 409 : 404, {
-						error: options.sessionApi ? "Session has active or queued runs" : "Session not found",
+				if (
+					!access.upstreamSession ||
+					!options.sessionApi ||
+					options.canArchive?.(sessionEndpoint.sessionId) === false
+				) {
+					sendJson(res, access.upstreamSession && options.sessionApi ? 409 : 404, {
+						error:
+							access.upstreamSession && options.sessionApi
+								? "Session has active or queued runs"
+								: "Session not found",
 					});
 					return;
 				}

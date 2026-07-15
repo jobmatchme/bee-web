@@ -73,13 +73,21 @@ export function createUserMessageEvent(input: CreateUserMessageEventInput): Dash
 	};
 }
 
-export function createErrorEvent(sessionId: string, _error: unknown, turnId?: string): DashboardEvent {
+const GENERIC_RUN_ERROR = "Fabee konnte diesen Run nicht abschließen.";
+const RELOGIN_RUN_ERROR = "Ihre Anmeldung ist abgelaufen. Bitte melden Sie sich neu an und versuchen Sie es erneut.";
+
+export function sanitizeRunError(error: unknown): string {
+	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+	return /auth-expired|missing[-_ ]credential|credential/i.test(message) ? RELOGIN_RUN_ERROR : GENERIC_RUN_ERROR;
+}
+
+export function createErrorEvent(sessionId: string, error: unknown, turnId?: string): DashboardEvent {
 	return {
 		type: "run.failed",
 		sessionId,
 		turnId: turnId ?? "",
 		at: new Date().toISOString(),
-		error: "Fabee konnte diesen Run nicht abschließen.",
+		error: sanitizeRunError(error),
 	};
 }
 
@@ -104,7 +112,7 @@ export function mapBeeEventToDashboardEvents(event: BeeRunEvent): DashboardEvent
 					sessionId: event.sessionId,
 					turnId: event.turnId ?? "",
 					at: event.time,
-					error: getStringPayloadValue(event.payload, "error") ?? "Run failed",
+					error: sanitizeRunError(getStringPayloadValue(event.payload, "error")),
 				},
 			];
 		case "item.appended": {
