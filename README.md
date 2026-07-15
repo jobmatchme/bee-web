@@ -4,7 +4,7 @@
 
 It exposes a small local HTTP/SSE API for `bee-dashboard`, forwards turns to
 Bee compatible workers through `@jobmatchme/bee-gate` and NATS, and can proxy
-read-only history from `fabee-log-read-api` for the authenticated web user.
+session data from `fabee-session-api` for the authenticated web user.
 
 ## Design intent
 
@@ -76,7 +76,7 @@ GET  /api/history/sessions/:sessionId
 GET  /api/history/sessions/:sessionId/runs
 ```
 
-History endpoints proxy `fabee-log-read-api` with the current authenticated
+History endpoints proxy `fabee-session-api` with the current authenticated
 user only.
 
 SSE sends a named `snapshot` event on connect/reconnect plus live `status` events (`waiting`, `running`, `completed`, `failed`, `cancelled`).
