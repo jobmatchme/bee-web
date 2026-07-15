@@ -52,6 +52,10 @@ config:
     defaultLimit: 50
     bearerTokenSecretName: ""
     bearerTokenSecretKey: ""
+  sessionApi:
+    baseUrl: ""
+    bearerTokenSecretName: ""
+    bearerTokenSecretKey: ""
   artifactStore:
     rootDir: ""
 

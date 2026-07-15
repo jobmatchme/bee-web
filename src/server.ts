@@ -3,8 +3,9 @@ import { stat } from "fs/promises";
 import type { IncomingMessage, ServerResponse } from "http";
 import { createServer } from "http";
 import { basename, extname, join, resolve } from "path";
-import { DEFAULT_EMAIL_HEADERS, getAuthenticatedWebUser } from "./auth.js";
-import { createWebSession, findRoute, getRouteHistoryAgentId, isUserScopedRoute, toPublicRoute } from "./router.js";
+import { DEFAULT_EMAIL_HEADERS, deriveUserKeyFromEmail, getAuthenticatedWebUser } from "./auth.js";
+import { createWebSession, findRoute, toPublicRoute } from "./router.js";
+import { SessionApiError, type SharedDeskSessionApi } from "./session-api-client.js";
 import { SseFanout } from "./sse.js";
 import type {
 	HistoryRunRecord,
@@ -12,17 +13,15 @@ import type {
 	HistorySessionSummaryRecord,
 	WebGatewayConfig,
 	WebRouteConfig,
+	WebSessionRecord,
 } from "./types.js";
 
-interface CreateSessionBody {
-	routeId?: string;
-	operatorId?: string;
+interface MessageBody {
+	text?: string;
 }
 
-interface MessageBody {
-	routeId?: string;
-	operatorId?: string;
-	text?: string;
+interface CollaboratorsBody {
+	collaborators?: string[];
 }
 
 export interface RegisteredArtifact {
@@ -38,15 +37,17 @@ export interface RegisteredArtifact {
 
 export interface WebMessageRequest {
 	sessionId: string;
+	conversationId: string;
 	route: WebRouteConfig;
 	routeId: string;
 	operatorId: string;
 	text: string;
-	user?: {
+	user: {
 		email: string;
 		userKey: string;
 		operatorId: string;
 	};
+	reauthorize: () => Promise<void>;
 }
 
 export interface WebMessageDispatchResult {
@@ -57,6 +58,8 @@ export interface WebMessageDispatchResult {
 
 export interface WebCancelRequest {
 	sessionId: string;
+	turnId: string;
+	user: { email: string; userKey: string; operatorId: string };
 }
 
 export interface WebCancelResult {
@@ -84,8 +87,10 @@ export interface WebHistorySessionRequest {
 
 export interface CreateWebGatewayServerOptions {
 	fanout?: SseFanout;
+	sessionApi?: SharedDeskSessionApi;
 	handleMessage?: (request: WebMessageRequest) => Promise<WebMessageDispatchResult> | WebMessageDispatchResult;
 	handleCancel?: (request: WebCancelRequest) => Promise<WebCancelResult | boolean> | WebCancelResult | boolean;
+	canArchive?: (sessionId: string) => boolean;
 	history?: {
 		listSessions?: (
 			request: WebHistoryListRequest,
@@ -113,8 +118,11 @@ function applyCors(config: WebGatewayConfig, req: IncomingMessage, res: ServerRe
 
 	res.setHeader("access-control-allow-origin", allowOrigin ?? "*");
 	res.setHeader("vary", "Origin");
-	res.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
-	res.setHeader("access-control-allow-headers", "Content-Type, Last-Event-ID");
+	res.setHeader("access-control-allow-methods", "GET,POST,PUT,OPTIONS");
+	res.setHeader(
+		"access-control-allow-headers",
+		"Content-Type, Last-Event-ID, X-Forwarded-Email, X-Auth-Request-Email",
+	);
 }
 
 async function readJsonBody<T>(req: IncomingMessage): Promise<T | null> {
@@ -132,6 +140,14 @@ async function readJsonBody<T>(req: IncomingMessage): Promise<T | null> {
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
 	res.writeHead(status, { "content-type": "application/json" });
 	res.end(JSON.stringify(body));
+}
+
+function errorStatus(error: unknown, fallback = 400): number {
+	return error instanceof SessionApiError ? error.status : fallback;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 function parseDataUri(uri: string): { mimeType?: string; data: Buffer } | undefined {
@@ -167,13 +183,21 @@ function attachmentHeaders(artifact: RegisteredArtifact, contentLength?: number)
 
 function matchSessionEndpoint(
 	pathname: string,
-): { sessionId: string; action: "events" | "messages" | "cancel" } | null {
-	const match = /^\/api\/sessions\/([^/]+)\/(events|messages|cancel)$/.exec(pathname);
+): { sessionId: string; action: "detail" | "events" | "messages" | "collaborators" | "archive" } | null {
+	const detail = /^\/api\/sessions\/([^/]+)$/.exec(pathname);
+	if (detail) return { sessionId: decodeURIComponent(detail[1]!), action: "detail" };
+	const match = /^\/api\/sessions\/([^/]+)\/(events|messages|collaborators|archive)$/.exec(pathname);
 	if (!match) return null;
 	return {
 		sessionId: decodeURIComponent(match[1]!),
-		action: match[2] as "events" | "messages" | "cancel",
+		action: match[2] as "events" | "messages" | "collaborators" | "archive",
 	};
+}
+
+function matchCancelEndpoint(pathname: string): { sessionId: string; turnId: string } | null {
+	const match = /^\/api\/sessions\/([^/]+)\/runs\/([^/]+)\/cancel$/.exec(pathname);
+	if (!match) return null;
+	return { sessionId: decodeURIComponent(match[1]!), turnId: decodeURIComponent(match[2]!) };
 }
 
 function matchArtifactEndpoint(pathname: string): { sessionId: string; artifactId: string } | null {
@@ -207,7 +231,7 @@ function getHistoryLimit(config: WebGatewayConfig, req: IncomingMessage): number
 	if (!Number.isFinite(limit) || limit <= 0) {
 		throw new Error("limit must be a positive integer");
 	}
-	return Math.min(limit, 200);
+	return Math.min(limit, 50);
 }
 
 function requireAuthenticatedUser(config: WebGatewayConfig, req: IncomingMessage) {
@@ -218,31 +242,10 @@ function requireAuthenticatedUser(config: WebGatewayConfig, req: IncomingMessage
 	return user;
 }
 
-function resolveMessageOperatorId(req: IncomingMessage, body: MessageBody | null, config: WebGatewayConfig): string {
-	const user = getAuthenticatedWebUser(req, config.auth?.emailHeaders ?? DEFAULT_EMAIL_HEADERS);
-	return user?.operatorId || body?.operatorId?.trim() || "web-user";
-}
-
-function findRouteBySessionId(config: WebGatewayConfig, sessionId: string): WebRouteConfig | undefined {
-	return config.routes.find((route) => {
-		const agentId = getRouteHistoryAgentId(route);
-		if (agentId && sessionId.startsWith(`${agentId}:web:`)) return true;
-		return sessionId.startsWith(`${route.session?.prefix || route.id}:`);
-	});
-}
-
-function assertSessionAccess(
-	config: WebGatewayConfig,
-	req: IncomingMessage,
-	route: WebRouteConfig,
-	sessionId: string,
-): void {
-	if (!isUserScopedRoute(route)) return;
-	const user = requireAuthenticatedUser(config, req);
-	const agentId = getRouteHistoryAgentId(route);
-	if (!agentId || !sessionId.startsWith(`${agentId}:web:${user.userKey}:`)) {
-		throw new Error("Session not found");
-	}
+function firstRoute(config: WebGatewayConfig): WebRouteConfig {
+	const route = config.routes[0];
+	if (!route) throw new Error("No routes configured");
+	return route;
 }
 
 async function sendArtifact(
@@ -287,11 +290,24 @@ async function sendArtifact(
 
 export function createWebGatewayServer(config: WebGatewayConfig, options: CreateWebGatewayServerOptions = {}) {
 	const fanout = options.fanout ?? new SseFanout();
+	const sessions = new Map<string, { session: WebSessionRecord; userKey: string }>();
 	const artifacts = new Map<string, RegisteredArtifact>();
 	const artifactKey = (sessionId: string, artifactId: string) => `${sessionId}\0${artifactId}`;
 	const registerArtifact = (sessionId: string, artifact: RegisteredArtifact): void => {
 		const key = artifactKey(sessionId, artifact.id);
 		artifacts.set(key, { ...artifacts.get(key), ...artifact });
+	};
+	const requireSession = async (sessionId: string, req: IncomingMessage) => {
+		const user = requireAuthenticatedUser(config, req);
+		const session = options.sessionApi
+			? await options.sessionApi.requireSessionAccess(sessionId, user.email)
+			: sessions.get(sessionId)?.session;
+		if (!session || (!options.sessionApi && sessions.get(sessionId)?.userKey !== user.userKey)) {
+			throw new SessionApiError("Session not found", 404);
+		}
+		const route = findRoute(config, session.routeId);
+		if (!route) throw new SessionApiError("Session not found", 404);
+		return { session, route, user };
 	};
 	const server = createServer(async (req, res) => {
 		applyCors(config, req, res);
@@ -316,36 +332,45 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 		}
 
 		if (method === "GET" && pathname === "/api/routes") {
-			sendJson(res, 200, { routes: config.routes.map(toPublicRoute) });
+			const routes = options.sessionApi ? config.routes.filter((route) => route.id === "fabee") : config.routes;
+			sendJson(res, 200, { routes: routes.map(toPublicRoute) });
+			return;
+		}
+
+		if (method === "GET" && pathname === "/api/sessions") {
+			try {
+				const user = requireAuthenticatedUser(config, req);
+				const limit = getHistoryLimit(config, req);
+				if (options.sessionApi) {
+					sendJson(res, 200, await options.sessionApi.listSessions(user.email, limit));
+					return;
+				}
+				const owned = [...sessions.values()]
+					.filter((item) => item.userKey === user.userKey)
+					.map((item) => ({
+						sessionId: item.session.id,
+						routeId: item.session.routeId,
+						metadata: { routeId: item.session.routeId, createdAt: item.session.createdAt },
+					}));
+				sendJson(res, 200, { owned, shared: [] });
+			} catch (error) {
+				sendJson(res, errorStatus(error), { error: errorMessage(error) });
+			}
 			return;
 		}
 
 		if (method === "POST" && pathname === "/api/sessions") {
-			let body: CreateSessionBody | null;
 			try {
-				body = await readJsonBody<CreateSessionBody>(req);
-			} catch {
-				sendJson(res, 400, { error: "Invalid JSON body" });
-				return;
-			}
-
-			const routeId = body?.routeId?.trim();
-			if (!routeId) {
-				sendJson(res, 400, { error: "routeId is required" });
-				return;
-			}
-
-			const route = findRoute(config, routeId);
-			if (!route) {
-				sendJson(res, 400, { error: "Unknown routeId" });
-				return;
-			}
-
-			try {
-				const user = isUserScopedRoute(route) ? requireAuthenticatedUser(config, req) : undefined;
-				sendJson(res, 201, { session: createWebSession(route, user) });
+				const user = requireAuthenticatedUser(config, req);
+				const route = options.sessionApi ? findRoute(config, "fabee") : firstRoute(config);
+				if (!route) throw new Error("Fabee route is not configured");
+				const session = options.sessionApi
+					? await options.sessionApi.createSession(user.email)
+					: createWebSession(route, user);
+				sessions.set(session.id, { session, userKey: user.userKey });
+				sendJson(res, 201, { session });
 			} catch (error) {
-				sendJson(res, 401, { error: error instanceof Error ? error.message : String(error) });
+				sendJson(res, errorStatus(error, 401), { error: errorMessage(error) });
 			}
 			return;
 		}
@@ -360,18 +385,14 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 			try {
 				const user = requireAuthenticatedUser(config, req);
 				if (historyEndpoint.action === "list") {
-					const routeId = getSearchParams(req.url).get("routeId")?.trim() || undefined;
 					const limit = getHistoryLimit(config, req);
-					const sessions = (await options.history.listSessions?.({ user, routeId, limit })) ?? [];
+					const sessions = (await options.history.listSessions?.({ user, limit })) ?? [];
 					sendJson(res, 200, { sessions });
 					return;
 				}
 
 				const sessionId = historyEndpoint.sessionId!;
-				if (!findRouteBySessionId(config, sessionId)) {
-					sendJson(res, 404, { error: "Session not found" });
-					return;
-				}
+				await requireSession(sessionId, req);
 
 				if (historyEndpoint.action === "detail") {
 					const session = await options.history.getSession?.({ user, sessionId });
@@ -389,14 +410,30 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 
 		const artifactEndpoint = matchArtifactEndpoint(pathname);
 		if (method === "GET" && artifactEndpoint) {
-			const sessionRoute = findRouteBySessionId(config, artifactEndpoint.sessionId);
-			if (sessionRoute) {
+			let access: Awaited<ReturnType<typeof requireSession>>;
+			try {
+				access = await requireSession(artifactEndpoint.sessionId, req);
+			} catch (error) {
+				sendJson(res, 404, { error: errorMessage(error) });
+				return;
+			}
+
+			if (options.sessionApi) {
 				try {
-					assertSessionAccess(config, req, sessionRoute, artifactEndpoint.sessionId);
+					const upstream = await options.sessionApi.fetchArtifact(
+						artifactEndpoint.sessionId,
+						artifactEndpoint.artifactId,
+						access.user.email,
+					);
+					res.writeHead(upstream.status, Object.fromEntries(upstream.headers.entries()));
+					if (upstream.body) {
+						for await (const chunk of upstream.body as any) res.write(chunk);
+					}
+					res.end();
 				} catch (error) {
-					sendJson(res, 404, { error: error instanceof Error ? error.message : String(error) });
-					return;
+					sendJson(res, errorStatus(error, 404), { error: errorMessage(error) });
 				}
+				return;
 			}
 
 			const artifact = artifacts.get(artifactKey(artifactEndpoint.sessionId, artifactEndpoint.artifactId));
@@ -408,25 +445,61 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 			try {
 				await sendArtifact(config, artifact, res);
 			} catch (error) {
-				sendJson(res, 404, { error: error instanceof Error ? error.message : String(error) });
+				sendJson(res, 404, { error: errorMessage(error) });
+			}
+			return;
+		}
+
+		const cancelEndpoint = matchCancelEndpoint(pathname);
+		if (method === "POST" && cancelEndpoint) {
+			let access: Awaited<ReturnType<typeof requireSession>>;
+			try {
+				access = await requireSession(cancelEndpoint.sessionId, req);
+			} catch (error) {
+				sendJson(res, 404, { error: errorMessage(error) });
+				return;
+			}
+			try {
+				const rawResult =
+					(await options.handleCancel?.({
+						sessionId: cancelEndpoint.sessionId,
+						turnId: cancelEndpoint.turnId,
+						user: access.user,
+					})) ?? false;
+				const result = typeof rawResult === "boolean" ? { cancelled: rawResult } : rawResult;
+				sendJson(res, 202, result);
+			} catch (error) {
+				sendJson(res, errorStatus(error, 404), { error: errorMessage(error) });
 			}
 			return;
 		}
 
 		const sessionEndpoint = matchSessionEndpoint(pathname);
 		if (sessionEndpoint) {
-			const sessionRoute = findRouteBySessionId(config, sessionEndpoint.sessionId);
-			if (sessionRoute) {
-				try {
-					assertSessionAccess(config, req, sessionRoute, sessionEndpoint.sessionId);
-				} catch (error) {
-					sendJson(res, 404, { error: error instanceof Error ? error.message : String(error) });
+			let access: Awaited<ReturnType<typeof requireSession>>;
+			try {
+				access = await requireSession(sessionEndpoint.sessionId, req);
+			} catch (error) {
+				sendJson(res, 404, { error: error instanceof Error ? error.message : String(error) });
+				return;
+			}
+
+			if (method === "GET" && sessionEndpoint.action === "detail") {
+				if (options.sessionApi) {
+					try {
+						const session = await options.sessionApi.getSession(sessionEndpoint.sessionId, access.user.email);
+						sendJson(res, 200, { session });
+					} catch (error) {
+						sendJson(res, errorStatus(error, 404), { error: errorMessage(error) });
+					}
 					return;
 				}
+				sendJson(res, 200, { session: access.session });
+				return;
 			}
 
 			if (method === "GET" && sessionEndpoint.action === "events") {
-				fanout.addClient(sessionEndpoint.sessionId, req, res);
+				fanout.addClient(sessionEndpoint.sessionId, access.user.userKey, req, res);
 				return;
 			}
 
@@ -439,52 +512,85 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 					return;
 				}
 
-				const routeId = getRequiredString(body?.routeId, "routeId");
-				if ("error" in routeId) {
-					sendJson(res, 400, { error: routeId.error });
-					return;
-				}
-
 				const text = getRequiredString(body?.text, "text");
 				if ("error" in text) {
 					sendJson(res, 400, { error: text.error });
 					return;
 				}
 
-				const route = findRoute(config, routeId.value);
-				if (!route) {
-					sendJson(res, 400, { error: "Unknown routeId" });
-					return;
-				}
-
 				try {
-					assertSessionAccess(config, req, route, sessionEndpoint.sessionId);
+					const result = (await options.handleMessage?.({
+						sessionId: sessionEndpoint.sessionId,
+						conversationId: access.session.conversationId,
+						route: access.route,
+						routeId: access.route.id,
+						operatorId: access.user.email,
+						text: text.value,
+						user: access.user,
+						reauthorize: async () => {
+							await requireSession(sessionEndpoint.sessionId, req);
+						},
+					})) ?? { accepted: true };
+					sendJson(res, 202, {
+						accepted: result.accepted ?? true,
+						queued: result.queued ?? false,
+						turnId: result.turnId,
+					});
 				} catch (error) {
-					sendJson(res, 404, { error: error instanceof Error ? error.message : String(error) });
-					return;
+					sendJson(res, 429, { error: error instanceof Error ? error.message : String(error) });
 				}
-
-				const user = getAuthenticatedWebUser(req, config.auth?.emailHeaders ?? DEFAULT_EMAIL_HEADERS);
-				const result = (await options.handleMessage?.({
-					sessionId: sessionEndpoint.sessionId,
-					route,
-					routeId: routeId.value,
-					operatorId: resolveMessageOperatorId(req, body, config),
-					text: text.value,
-					user,
-				})) ?? { accepted: true };
-				sendJson(res, 202, {
-					accepted: result.accepted ?? true,
-					queued: result.queued ?? false,
-					turnId: result.turnId,
-				});
 				return;
 			}
 
-			if (method === "POST" && sessionEndpoint.action === "cancel") {
-				const rawResult = (await options.handleCancel?.({ sessionId: sessionEndpoint.sessionId })) ?? false;
-				const result = typeof rawResult === "boolean" ? { cancelled: rawResult } : rawResult;
-				sendJson(res, 202, result);
+			if (method === "PUT" && sessionEndpoint.action === "collaborators") {
+				if (!options.sessionApi) {
+					sendJson(res, 404, { error: "Session not found" });
+					return;
+				}
+				let body: CollaboratorsBody | null;
+				try {
+					body = await readJsonBody<CollaboratorsBody>(req);
+				} catch {
+					sendJson(res, 400, { error: "Invalid JSON body" });
+					return;
+				}
+				const collaborators = body?.collaborators;
+				if (!Array.isArray(collaborators)) {
+					sendJson(res, 400, { error: "collaborators is required" });
+					return;
+				}
+				try {
+					const before = await options.sessionApi.getSession(sessionEndpoint.sessionId, access.user.email);
+					const session = await options.sessionApi.putCollaborators(
+						sessionEndpoint.sessionId,
+						access.user.email,
+						collaborators,
+					);
+					for (const email of before.collaborators ?? []) {
+						if (!collaborators.includes(email))
+							fanout.closeUserSession(sessionEndpoint.sessionId, deriveUserKeyFromEmail(email));
+					}
+					sendJson(res, 200, { session });
+				} catch (error) {
+					sendJson(res, errorStatus(error, 404), { error: errorMessage(error) });
+				}
+				return;
+			}
+
+			if (method === "POST" && sessionEndpoint.action === "archive") {
+				if (!options.sessionApi || options.canArchive?.(sessionEndpoint.sessionId) === false) {
+					sendJson(res, options.sessionApi ? 409 : 404, {
+						error: options.sessionApi ? "Session has active or queued runs" : "Session not found",
+					});
+					return;
+				}
+				try {
+					await options.sessionApi.archiveSession(sessionEndpoint.sessionId, access.user.email);
+					fanout.closeSession(sessionEndpoint.sessionId);
+					sendJson(res, 202, { archived: true });
+				} catch (error) {
+					sendJson(res, errorStatus(error, 404), { error: errorMessage(error) });
+				}
 				return;
 			}
 		}

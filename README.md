@@ -62,10 +62,14 @@ The browser no longer needs to choose `userKey`.
 ```txt
 GET  /health
 GET  /api/routes
+GET  /api/sessions
 POST /api/sessions
+GET  /api/sessions/:sessionId
+PUT  /api/sessions/:sessionId/collaborators
+POST /api/sessions/:sessionId/archive
 GET  /api/sessions/:sessionId/events
 POST /api/sessions/:sessionId/messages
-POST /api/sessions/:sessionId/cancel
+POST /api/sessions/:sessionId/runs/:turnId/cancel
 GET  /api/sessions/:sessionId/artifacts/:artifactId/download
 GET  /api/history/sessions
 GET  /api/history/sessions/:sessionId
@@ -75,7 +79,7 @@ GET  /api/history/sessions/:sessionId/runs
 History endpoints proxy `fabee-log-read-api` with the current authenticated
 user only.
 
-SSE fanout is in-memory per session and intentionally has no replay buffer.
+SSE sends a named `snapshot` event on connect/reconnect plus live `status` events (`waiting`, `running`, `completed`, `failed`, `cancelled`).
 
 ## MVP scope
 

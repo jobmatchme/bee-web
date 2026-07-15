@@ -37,6 +37,13 @@ spec:
                   name: {{ .Values.config.history.bearerTokenSecretName }}
                   key: {{ required "config.history.bearerTokenSecretKey is required when bearerTokenSecretName is set" .Values.config.history.bearerTokenSecretKey }}
             {{- end }}
+            {{- if .Values.config.sessionApi.bearerTokenSecretName }}
+            - name: BEE_WEB_SESSION_API_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.sessionApi.bearerTokenSecretName }}
+                  key: {{ required "config.sessionApi.bearerTokenSecretKey is required when bearerTokenSecretName is set" .Values.config.sessionApi.bearerTokenSecretKey }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.container.port }}
