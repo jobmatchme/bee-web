@@ -36,6 +36,7 @@ export type DashboardEvent =
 			messageId: string;
 			role: "user" | "assistant";
 			content: string;
+			authorEmail?: string;
 			at: string;
 	  }
 	| { type: "message.delta"; sessionId: string; turnId?: string; messageId: string; delta: string; at: string }
@@ -54,6 +55,7 @@ export interface CreateUserMessageEventInput {
 	sessionId: string;
 	routeId: string;
 	operatorId: string;
+	actorEmail?: string;
 	text: string;
 	turnId?: string;
 }
@@ -66,17 +68,18 @@ export function createUserMessageEvent(input: CreateUserMessageEventInput): Dash
 		messageId: input.turnId ? `${input.turnId}:user` : `${input.routeId}:${input.operatorId}:${Date.now()}`,
 		role: "user",
 		content: input.text,
+		authorEmail: input.actorEmail,
 		at: new Date().toISOString(),
 	};
 }
 
-export function createErrorEvent(sessionId: string, error: unknown, turnId?: string): DashboardEvent {
+export function createErrorEvent(sessionId: string, _error: unknown, turnId?: string): DashboardEvent {
 	return {
 		type: "run.failed",
 		sessionId,
 		turnId: turnId ?? "",
 		at: new Date().toISOString(),
-		error: error instanceof Error ? error.message : String(error),
+		error: "Fabee konnte diesen Run nicht abschließen.",
 	};
 }
 

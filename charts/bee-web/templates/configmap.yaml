@@ -16,5 +16,8 @@ data:
         "baseUrl": {{ .Values.config.history.baseUrl | quote }},
         "defaultLimit": {{ .Values.config.history.defaultLimit }}
       },
+      "sessionApi": {
+        "baseUrl": {{ .Values.config.sessionApi.baseUrl | quote }}
+      },
       "artifactStore": {{ toJson .Values.config.artifactStore }}
     }

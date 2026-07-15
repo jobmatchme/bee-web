@@ -4,8 +4,9 @@ import { connect } from "nats";
 import { loadConfig } from "./config.js";
 import { createErrorEvent, createUserMessageEvent, mapBeeEventToDashboardEvents } from "./event-mapper.js";
 import { HistoryClient } from "./history-client.js";
-import { findRoute, getConversationIdForSession, getRouteHistoryAgentId } from "./router.js";
+import { findRoute, getRouteHistoryAgentId } from "./router.js";
 import { createWebGatewayServer } from "./server.js";
+import { SessionApiError, SharedDeskSessionApiClient } from "./session-api-client.js";
 import { SseFanout } from "./sse.js";
 
 interface ActiveRun {
@@ -13,6 +14,7 @@ interface ActiveRun {
 	route: BeeResolvedTurn["worker"];
 	threadId?: string;
 	controller: AbortController;
+	actorEmail: string;
 }
 
 export async function startWebGatewayFromEnv(configPath?: string): Promise<void> {
@@ -26,12 +28,19 @@ export async function startWebGatewayFromEnv(configPath?: string): Promise<void>
 					bearerToken: config.history.bearerToken,
 				})
 			: undefined;
+	const sessionApi = config.sessionApi?.baseUrl
+		? new SharedDeskSessionApiClient({
+				baseUrl: config.sessionApi.baseUrl,
+				bearerToken: config.sessionApi.bearerToken,
+			})
+		: undefined;
 	const fanout = new SseFanout();
-	const sessionQueues = new Map<string, Promise<void>>();
+	const sessionQueues = new Map<string, { tail: Promise<void>; waiting: number }>();
 	const activeRuns = new Map<string, ActiveRun>();
 
 	const gateway = createWebGatewayServer(config, {
 		fanout,
+		sessionApi,
 		history: historyClient
 			? {
 					listSessions: async ({ user, routeId, limit }) => {
@@ -60,28 +69,43 @@ export async function startWebGatewayFromEnv(configPath?: string): Promise<void>
 					getSessionRuns: async ({ user, sessionId }) => historyClient.getSessionRuns(sessionId, user.userKey),
 				}
 			: undefined,
-		handleMessage: ({ sessionId, route, routeId, operatorId, text, user }) => {
+		handleMessage: ({ sessionId, conversationId, route, routeId, operatorId, text, user, reauthorize }) => {
 			const input: BeeResolvedTurn = {
 				sessionId,
 				worker: route.worker,
 				conversation: {
-					conversationId: getConversationIdForSession(route, sessionId),
+					conversationId,
 					transport: "web",
 				},
 				actor: {
-					userId: user ? `web:${user.userKey}` : `web:${operatorId}`,
+					userId: `web:${user.userKey}`,
 					displayName: operatorId,
-				},
+					email: user.email,
+				} as BeeResolvedTurn["actor"],
 				message: {
 					text,
 				},
 				output: {},
 			};
 			const turnId = newTurnId();
-			const queued = sessionQueues.has(sessionId);
+			const queue = sessionQueues.get(sessionId) ?? { tail: Promise.resolve(), waiting: 0 };
+			const queued = activeRuns.has(sessionId) || queue.waiting > 0;
+			if (queue.waiting >= 10) throw new Error("Session queue is full");
 			const controller = new AbortController();
+			let leftQueue = false;
 			const runTask = async () => {
-				activeRuns.set(sessionId, { turnId, route: route.worker, controller });
+				try {
+					await reauthorize();
+				} catch {
+					queue.waiting -= 1;
+					leftQueue = true;
+					fanout.finish(sessionId, turnId, "cancelled", "access-revoked");
+					return;
+				}
+				queue.waiting -= 1;
+				leftQueue = true;
+				fanout.start(sessionId, turnId);
+				activeRuns.set(sessionId, { turnId, route: route.worker, controller, actorEmail: user.email });
 				try {
 					await workerClient.streamTurn(
 						route.worker,
@@ -98,43 +122,59 @@ export async function startWebGatewayFromEnv(configPath?: string): Promise<void>
 							for (const dashboardEvent of mapBeeEventToDashboardEvents(event)) {
 								if (dashboardEvent.type === "artifact.created") {
 									gateway.registerArtifact(sessionId, dashboardEvent.artifact);
+									fanout.addArtifact(sessionId, dashboardEvent.artifact);
 								}
 								fanout.broadcast(sessionId, dashboardEvent.type, dashboardEvent);
 							}
 						},
 						{ signal: controller.signal },
 					);
+					fanout.finish(sessionId, turnId, "completed");
 				} catch (error) {
 					const dashboardEvent = createErrorEvent(sessionId, error, turnId);
 					fanout.broadcast(sessionId, dashboardEvent.type, dashboardEvent);
+					fanout.finish(sessionId, turnId, controller.signal.aborted ? "cancelled" : "failed");
 				} finally {
 					activeRuns.delete(sessionId);
 				}
 			};
-			const previous = sessionQueues.get(sessionId) ?? Promise.resolve();
-			const next = previous
+			fanout.enqueue(sessionId, { turnId, actorEmail: user.email, text });
+			queue.waiting += 1;
+			const next = queue.tail
 				.catch(() => undefined)
 				.then(runTask)
 				.finally(() => {
-					if (sessionQueues.get(sessionId) === next) {
+					if (!leftQueue) queue.waiting -= 1;
+					if (sessionQueues.get(sessionId)?.tail === next && queue.waiting === 0) {
 						sessionQueues.delete(sessionId);
 					}
 				});
-			sessionQueues.set(sessionId, next);
+			queue.tail = next;
+			sessionQueues.set(sessionId, queue);
 
 			const userMessageEvent = createUserMessageEvent({
 				sessionId,
 				routeId,
 				operatorId,
+				actorEmail: user.email,
 				text,
 				turnId,
 			});
 			fanout.broadcast(sessionId, userMessageEvent.type, userMessageEvent);
 			return { accepted: true, queued, turnId };
 		},
-		handleCancel: async ({ sessionId }) => {
+		canArchive: (sessionId) => !activeRuns.has(sessionId) && !sessionQueues.has(sessionId),
+		handleCancel: async ({ sessionId, turnId, user }) => {
 			const active = activeRuns.get(sessionId);
-			if (!active) return { cancelled: false };
+			if (!active || active.turnId !== turnId) return { cancelled: false };
+			if (sessionApi) {
+				const capabilities = await sessionApi.getCapabilities(sessionId, user.email, active.actorEmail);
+				if (capabilities.role !== "owner" && active.actorEmail !== user.email) {
+					throw new SessionApiError("Session not found", 404);
+				}
+			} else if (active.actorEmail !== user.email) {
+				return { cancelled: false };
+			}
 			active.controller.abort();
 			return { cancelled: true };
 		},

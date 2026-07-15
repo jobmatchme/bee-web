@@ -1,4 +1,4 @@
-import { buildConversationId, buildSessionKey } from "@jobmatchme/bee-gate";
+import { buildConversationId } from "@jobmatchme/bee-gate";
 import { randomUUID } from "crypto";
 import type { WebGatewayConfig, WebRouteConfig, WebSessionRecord } from "./types.js";
 
@@ -29,46 +29,16 @@ export function isUserScopedRoute(route: WebRouteConfig): boolean {
 	return route.session?.userScoped === true;
 }
 
-export function getConversationIdForSession(route: WebRouteConfig, sessionId: string): string {
-	if (isUserScopedRoute(route) && getRouteHistoryAgentId(route)) {
-		return sessionId;
-	}
-
-	const prefix = `${getRouteSessionPrefix(route)}:`;
-	if (sessionId.startsWith(prefix)) {
-		return sessionId.slice(prefix.length);
-	}
-	return buildConversationId(["web", route.id, sessionId]);
+export function getConversationIdForSession(_route: WebRouteConfig, sessionId: string): string {
+	return buildConversationId(["web", sessionId]);
 }
 
-export function createWebSession(route: WebRouteConfig, user?: { userKey: string }): WebSessionRecord {
-	const id = randomUUID();
-	const createdAt = new Date().toISOString();
-
-	if (isUserScopedRoute(route)) {
-		const agentId = getRouteHistoryAgentId(route);
-		if (!agentId) {
-			throw new Error(`Route ${route.id} is userScoped but missing session.agentId`);
-		}
-		if (!user?.userKey) {
-			throw new Error(`Route ${route.id} requires an authenticated user`);
-		}
-		const sessionId = buildSessionKey(`${agentId}:web:${user.userKey}`, id);
-		return {
-			id: sessionId,
-			conversationId: sessionId,
-			routeId: route.id,
-			createdAt,
-		};
-	}
-
-	const conversationId = buildConversationId(["web", route.id, `conv_${id}`]);
-	const sessionId = buildSessionKey(getRouteSessionPrefix(route), conversationId);
-
+export function createWebSession(route: WebRouteConfig, _user?: { userKey: string }): WebSessionRecord {
+	const id = `web_${randomUUID()}`;
 	return {
-		id: sessionId,
-		conversationId,
+		id,
+		conversationId: getConversationIdForSession(route, id),
 		routeId: route.id,
-		createdAt,
+		createdAt: new Date().toISOString(),
 	};
 }

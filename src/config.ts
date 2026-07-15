@@ -53,6 +53,10 @@ export function loadConfig(configPath?: string): WebGatewayConfig {
 			bearerToken: readStringEnv("BEE_WEB_HISTORY_API_BEARER_TOKEN") ?? config.history?.bearerToken,
 			defaultLimit: readPositiveIntEnv("BEE_WEB_HISTORY_API_DEFAULT_LIMIT") ?? config.history?.defaultLimit ?? 50,
 		},
+		sessionApi: {
+			baseUrl: readStringEnv("BEE_WEB_SESSION_API_BASE_URL") ?? config.sessionApi?.baseUrl,
+			bearerToken: readStringEnv("BEE_WEB_SESSION_API_BEARER_TOKEN") ?? config.sessionApi?.bearerToken,
+		},
 		artifactStore: {
 			rootDir: readStringEnv("BEE_WEB_ARTIFACT_STORE_ROOT") ?? config.artifactStore?.rootDir,
 		},

@@ -29,6 +29,11 @@ export interface WebHistoryConfig {
 	defaultLimit?: number;
 }
 
+export interface WebSessionApiConfig {
+	baseUrl?: string;
+	bearerToken?: string;
+}
+
 export interface WebArtifactStoreConfig {
 	rootDir?: string;
 }
@@ -41,6 +46,7 @@ export interface WebGatewayConfig {
 	cors?: WebCorsConfig;
 	auth?: WebAuthConfig;
 	history?: WebHistoryConfig;
+	sessionApi?: WebSessionApiConfig;
 	artifactStore?: WebArtifactStoreConfig;
 }
 
