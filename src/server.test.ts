@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { deriveUserKeyFromEmail, getAuthenticatedWebUser } from "./auth.js";
+import { createErrorEvent, mapBeeEventToDashboardEvents } from "./event-mapper.js";
 import { createWebSession, getConversationIdForSession } from "./router.js";
 import { createWebGatewayServer } from "./server.js";
+import type { SharedDeskSessionApi } from "./session-api-client.js";
 import type { WebGatewayConfig, WebRouteConfig } from "./types.js";
 
 const fabeeRoute: WebRouteConfig = {
@@ -11,6 +13,50 @@ const fabeeRoute: WebRouteConfig = {
 	worker: { subject: "fabee.agent.pi.default" },
 	session: { agentId: "fabee-pi-agent", userScoped: true },
 };
+
+const companyBriefingRoute: WebRouteConfig = {
+	id: "company-briefing",
+	label: "Company Briefing",
+	worker: { subject: "company.agent" },
+	session: { agentId: "company-agent", userScoped: true },
+};
+
+const marketInsightsRoute: WebRouteConfig = {
+	id: "market-insights",
+	label: "Market Insights",
+	worker: { subject: "market.agent" },
+	session: { agentId: "market-agent", userScoped: true },
+};
+
+function fakeSessionApi(overrides: Partial<SharedDeskSessionApi> = {}): SharedDeskSessionApi {
+	return {
+		async createSession() {
+			return { id: "ses_1", conversationId: "conv_1", routeId: "fabee", createdAt: "now" };
+		},
+		async listSessions() {
+			return { owned: [], shared: [] };
+		},
+		async getSession() {
+			return {
+				sessionId: "ses_1",
+				conversationId: "conv_1",
+				metadata: { routeId: "fabee", createdAt: "now" },
+				owner: "alice@jobmatch.me",
+			};
+		},
+		async getCapabilities() {
+			return {};
+		},
+		async putCollaborators() {
+			throw new Error("unused");
+		},
+		async archiveSession() {},
+		async fetchArtifact() {
+			throw new Error("unused");
+		},
+		...overrides,
+	};
+}
 
 test("deriveUserKeyFromEmail strips @jobmatch.me and sanitizes the rest", () => {
 	assert.equal(deriveUserKeyFromEmail("alice@jobmatch.me"), "alice");
@@ -32,6 +78,23 @@ test("createWebSession uses opaque web session ids", () => {
 	assert.match(session.id, /^web_[0-9a-f-]+$/);
 	assert.equal(session.conversationId, getConversationIdForSession(fabeeRoute, session.id));
 	assert.equal(session.routeId, "fabee");
+});
+
+test("run failures are sanitized before dashboard delivery", () => {
+	const auth = createErrorEvent("s1", new Error("auth-expired: /Users/alice/.config/provider/token.json"), "t1");
+	const generic = mapBeeEventToDashboardEvents({
+		name: "run.failed",
+		sessionId: "s1",
+		turnId: "t2",
+		time: "now",
+		payload: { error: "provider stack /tmp/key" },
+	} as any)[0];
+
+	assert.equal(auth.type, "run.failed");
+	assert.match(auth.error, /neu an/);
+	assert.doesNotMatch(auth.error, /Users|provider|token/);
+	assert.equal(generic?.type, "run.failed");
+	if (generic?.type === "run.failed") assert.equal(generic.error, "Fabee konnte diesen Run nicht abschließen.");
 });
 
 test("artifact download returns registered data URI payload", async (t) => {
@@ -150,6 +213,110 @@ test("local session list uses the public session summary contract", async (t) =>
 	assert.equal(response.status, 200);
 	assert.match(body.owned[0]?.sessionId ?? "", /^web_/);
 	assert.equal(body.owned[0]?.id, undefined);
+});
+
+test("session API mode still returns every configured route", async (t) => {
+	const config: WebGatewayConfig = {
+		port: 0,
+		host: "127.0.0.1",
+		nats: { servers: "nats://unused:4222" },
+		routes: [fabeeRoute, companyBriefingRoute, marketInsightsRoute],
+		auth: { emailHeaders: ["x-forwarded-email"] },
+	};
+	const { server } = createWebGatewayServer(config, { sessionApi: fakeSessionApi() });
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	t.after(() => server.close());
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+
+	const response = await fetch(`http://127.0.0.1:${address.port}/api/routes`);
+	const body = (await response.json()) as { routes: Array<{ id: string }> };
+
+	assert.deepEqual(
+		body.routes.map((route) => route.id),
+		["fabee", "company-briefing", "market-insights"],
+	);
+});
+
+test("session API mode creates non-fabee sessions locally and fabee sessions upstream", async (t) => {
+	const config: WebGatewayConfig = {
+		port: 0,
+		host: "127.0.0.1",
+		nats: { servers: "nats://unused:4222" },
+		routes: [fabeeRoute, companyBriefingRoute],
+		auth: { emailHeaders: ["x-forwarded-email"] },
+	};
+	let createdUpstream = 0;
+	let seen: { routeId: string; conversationId: string } | undefined;
+	const { server } = createWebGatewayServer(config, {
+		sessionApi: fakeSessionApi({
+			createSession: async () => {
+				createdUpstream += 1;
+				return { id: "ses_fabee", conversationId: "conv_fabee", routeId: "fabee", createdAt: "now" };
+			},
+		}),
+		handleMessage: ({ routeId, conversationId }) => {
+			seen = { routeId, conversationId };
+			return { accepted: true, turnId: "turn-local" };
+		},
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	t.after(() => server.close());
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+
+	const localCreate = await fetch(`http://127.0.0.1:${address.port}/api/sessions`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "x-forwarded-email": "alice@jobmatch.me" },
+		body: JSON.stringify({ routeId: "company-briefing" }),
+	});
+	const local = (await localCreate.json()) as { session: { id: string; routeId: string; conversationId: string } };
+	const message = await fetch(`http://127.0.0.1:${address.port}/api/sessions/${local.session.id}/messages`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "x-forwarded-email": "alice@jobmatch.me" },
+		body: JSON.stringify({ text: "hello" }),
+	});
+	const fabeeCreate = await fetch(`http://127.0.0.1:${address.port}/api/sessions`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "x-forwarded-email": "alice@jobmatch.me" },
+		body: JSON.stringify({ routeId: "fabee" }),
+	});
+	const fabee = (await fabeeCreate.json()) as { session: { id: string; routeId: string; conversationId: string } };
+
+	assert.equal(local.session.routeId, "company-briefing");
+	assert.match(local.session.id, /^web_/);
+	assert.equal(message.status, 202);
+	assert.deepEqual(seen, { routeId: "company-briefing", conversationId: local.session.conversationId });
+	assert.equal(createdUpstream, 1);
+	assert.deepEqual(fabee.session, {
+		id: "ses_fabee",
+		conversationId: "conv_fabee",
+		routeId: "fabee",
+		createdAt: "now",
+	});
+});
+
+test("create session rejects unknown route ids", async (t) => {
+	const config: WebGatewayConfig = {
+		port: 0,
+		host: "127.0.0.1",
+		nats: { servers: "nats://unused:4222" },
+		routes: [fabeeRoute],
+		auth: { emailHeaders: ["x-forwarded-email"] },
+	};
+	const { server } = createWebGatewayServer(config);
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	t.after(() => server.close());
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("server did not bind to a TCP port");
+
+	const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "x-forwarded-email": "alice@jobmatch.me" },
+		body: JSON.stringify({ routeId: "evil" }),
+	});
+
+	assert.equal(response.status, 404);
 });
 
 test("session API conversation id is authoritative for messages", async (t) => {

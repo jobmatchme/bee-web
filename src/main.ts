@@ -2,7 +2,12 @@
 import { type BeeResolvedTurn, type BeeRunEvent, NatsBeeClient, newTurnId } from "@jobmatchme/bee-gate";
 import { connect } from "nats";
 import { loadConfig } from "./config.js";
-import { createErrorEvent, createUserMessageEvent, mapBeeEventToDashboardEvents } from "./event-mapper.js";
+import {
+	createErrorEvent,
+	createUserMessageEvent,
+	mapBeeEventToDashboardEvents,
+	sanitizeRunError,
+} from "./event-mapper.js";
 import { HistoryClient } from "./history-client.js";
 import { findRoute, getRouteHistoryAgentId } from "./router.js";
 import { createWebGatewayServer } from "./server.js";
@@ -11,6 +16,7 @@ import { SseFanout } from "./sse.js";
 
 interface ActiveRun {
 	turnId: string;
+	routeId: string;
 	route: BeeResolvedTurn["worker"];
 	threadId?: string;
 	controller: AbortController;
@@ -105,7 +111,7 @@ export async function startWebGatewayFromEnv(configPath?: string): Promise<void>
 				queue.waiting -= 1;
 				leftQueue = true;
 				fanout.start(sessionId, turnId);
-				activeRuns.set(sessionId, { turnId, route: route.worker, controller, actorEmail: user.email });
+				activeRuns.set(sessionId, { turnId, routeId, route: route.worker, controller, actorEmail: user.email });
 				try {
 					await workerClient.streamTurn(
 						route.worker,
@@ -133,7 +139,12 @@ export async function startWebGatewayFromEnv(configPath?: string): Promise<void>
 				} catch (error) {
 					const dashboardEvent = createErrorEvent(sessionId, error, turnId);
 					fanout.broadcast(sessionId, dashboardEvent.type, dashboardEvent);
-					fanout.finish(sessionId, turnId, controller.signal.aborted ? "cancelled" : "failed");
+					fanout.finish(
+						sessionId,
+						turnId,
+						controller.signal.aborted ? "cancelled" : "failed",
+						sanitizeRunError(error),
+					);
 				} finally {
 					activeRuns.delete(sessionId);
 				}
@@ -167,7 +178,7 @@ export async function startWebGatewayFromEnv(configPath?: string): Promise<void>
 		handleCancel: async ({ sessionId, turnId, user }) => {
 			const active = activeRuns.get(sessionId);
 			if (!active || active.turnId !== turnId) return { cancelled: false };
-			if (sessionApi) {
+			if (sessionApi && active.routeId === "fabee") {
 				const capabilities = await sessionApi.getCapabilities(sessionId, user.email, active.actorEmail);
 				if (capabilities.role !== "owner" && active.actorEmail !== user.email) {
 					throw new SessionApiError("Session not found", 404);
