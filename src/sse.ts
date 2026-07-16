@@ -109,11 +109,12 @@ export class SseFanout {
 		const snapshot = this.getSnapshot(sessionId);
 		snapshot.queuedMessages.push(message);
 		this.broadcast(sessionId, "status", { type: "status", status: "waiting", sessionId, ...message });
-		this.broadcastSnapshot(sessionId);
 	}
 
 	start(sessionId: string, turnId: string): void {
 		const snapshot = this.getSnapshot(sessionId);
+		snapshot.events = [];
+		snapshot.artifacts = [];
 		const queued = snapshot.queuedMessages.find((item) => item.turnId === turnId);
 		if (queued) snapshot.activeTurn = { ...queued, startedAt: new Date().toISOString() };
 		snapshot.queuedMessages = snapshot.queuedMessages.filter((item) => item.turnId !== turnId);
@@ -126,8 +127,6 @@ export class SseFanout {
 		if (snapshot.activeTurn?.turnId === turnId) snapshot.activeTurn = undefined;
 		snapshot.queuedMessages = snapshot.queuedMessages.filter((item) => item.turnId !== turnId);
 		this.broadcast(sessionId, "status", { type: "status", status, reason, sessionId, turnId });
-		snapshot.events = [];
-		snapshot.artifacts = [];
 		this.broadcastSnapshot(sessionId);
 	}
 
