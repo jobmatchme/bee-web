@@ -4,6 +4,7 @@ import { deriveUserKeyFromEmail, getAuthenticatedWebUser } from "./auth.js";
 import { createErrorEvent, mapBeeEventToDashboardEvents } from "./event-mapper.js";
 import { createWebSession, getConversationIdForSession } from "./router.js";
 import { createWebGatewayServer } from "./server.js";
+import { SseFanout } from "./sse.js";
 import type { SharedDeskSessionApi } from "./session-api-client.js";
 import type { WebGatewayConfig, WebRouteConfig } from "./types.js";
 
@@ -58,6 +59,33 @@ function fakeSessionApi(overrides: Partial<SharedDeskSessionApi> = {}): SharedDe
 	};
 }
 
+test("completed run events remain available for SSE reconnects", () => {
+	const fanout = new SseFanout();
+	fanout.enqueue("session-1", { turnId: "turn-1", actorEmail: "alice@jobmatch.me", text: "hello" });
+	fanout.start("session-1", "turn-1");
+	fanout.broadcast("session-1", "message.created", { type: "message.created", content: "answer" });
+	fanout.finish("session-1", "turn-1", "completed");
+
+	assert.equal(fanout.getSnapshot("session-1").events.length, 1);
+});
+
+test("enqueue does not replay the previous run snapshot", () => {
+	class RecordingFanout extends SseFanout {
+		readonly broadcasts: string[] = [];
+		override broadcast(sessionId: string, type: string, data: unknown): number {
+			this.broadcasts.push(type);
+			return super.broadcast(sessionId, type, data);
+		}
+	}
+	const fanout = new RecordingFanout();
+	fanout.broadcast("session-1", "message.created", { type: "message.created", content: "old answer" });
+	fanout.broadcasts.length = 0;
+
+	fanout.enqueue("session-1", { turnId: "turn-2", actorEmail: "alice@jobmatch.me", text: "follow-up" });
+
+	assert.deepEqual(fanout.broadcasts, ["status"]);
+});
+
 test("deriveUserKeyFromEmail strips @jobmatch.me and sanitizes the rest", () => {
 	assert.equal(deriveUserKeyFromEmail("alice@jobmatch.me"), "alice");
 	assert.equal(deriveUserKeyFromEmail("alice+ops@jobmatch.me"), "alice_ops");
@@ -95,6 +123,18 @@ test("run failures are sanitized before dashboard delivery", () => {
 	assert.doesNotMatch(auth.error, /Users|provider|token/);
 	assert.equal(generic?.type, "run.failed");
 	if (generic?.type === "run.failed") assert.equal(generic.error, "Fabee konnte diesen Run nicht abschließen.");
+});
+
+test("maps private runtime items to dashboard usage events", () => {
+	const [event] = mapBeeEventToDashboardEvents({
+		name: "item.appended",
+		sessionId: "s1",
+		turnId: "t1",
+		time: "now",
+		payload: { item: { id: "t1:runtime", role: "system", parts: [{ kind: "json", value: { type: "runtime", usage: { contextTokens: 4116, contextWindow: 372000, reasoning: 25 }, model: { provider: "openai-codex", id: "gpt-5.6-sol" }, thinkingLevel: "medium" } }] } },
+	} as any);
+
+	assert.deepEqual(event, { type: "runtime.updated", sessionId: "s1", turnId: "t1", at: "now", runtime: { contextTokens: 4116, contextWindow: 372000, reasoningTokens: 25, reasoningLevel: "medium", model: { provider: "openai-codex", id: "gpt-5.6-sol" } } });
 });
 
 test("artifact download returns registered data URI payload", async (t) => {
@@ -282,10 +322,20 @@ test("session API mode creates non-fabee sessions locally and fabee sessions ups
 		body: JSON.stringify({ routeId: "fabee" }),
 	});
 	const fabee = (await fabeeCreate.json()) as { session: { id: string; routeId: string; conversationId: string } };
+	const archived = await fetch(`http://127.0.0.1:${address.port}/api/sessions/${local.session.id}/archive`, {
+		method: "POST",
+		headers: { "x-forwarded-email": "alice@jobmatch.me" },
+	});
+	const sessionsAfterArchive = await fetch(`http://127.0.0.1:${address.port}/api/sessions`, {
+		headers: { "x-forwarded-email": "alice@jobmatch.me" },
+	});
+	const afterArchive = (await sessionsAfterArchive.json()) as { owned: Array<{ sessionId?: string }> };
 
 	assert.equal(local.session.routeId, "company-briefing");
 	assert.match(local.session.id, /^web_/);
 	assert.equal(message.status, 202);
+	assert.equal(archived.status, 202);
+	assert.equal(afterArchive.owned.some((session) => session.sessionId === local.session.id), false);
 	assert.deepEqual(seen, { routeId: "company-briefing", conversationId: local.session.conversationId });
 	assert.equal(createdUpstream, 1);
 	assert.deepEqual(fabee.session, {

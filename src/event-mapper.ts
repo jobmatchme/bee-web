@@ -13,7 +13,16 @@ type DashboardItemPart =
 			uri?: string;
 			sizeBytes?: number;
 	  }
-	| { kind: "log"; text: string; stream?: "stdout" | "stderr" | "combined" };
+	| { kind: "log"; text: string; stream?: "stdout" | "stderr" | "combined" }
+	| { kind: "json"; value: unknown };
+
+export interface DashboardRuntimeStatus {
+	model?: { provider?: string; id?: string };
+	contextTokens?: number;
+	contextWindow?: number;
+	reasoningLevel?: string;
+	reasoningTokens?: number;
+}
 
 export interface ArtifactMeta {
 	id: string;
@@ -29,6 +38,7 @@ export type DashboardEvent =
 	| { type: "run.started"; sessionId: string; turnId: string; at: string }
 	| { type: "run.completed"; sessionId: string; turnId: string; at: string; stopReason?: string }
 	| { type: "run.failed"; sessionId: string; turnId: string; at: string; error: string }
+	| { type: "runtime.updated"; sessionId: string; turnId?: string; runtime: DashboardRuntimeStatus; at: string }
 	| {
 			type: "message.created";
 			sessionId: string;
@@ -228,6 +238,11 @@ function mapPartsToDashboardEvents(input: {
 				at: input.event.time,
 			});
 		}
+
+		if (part.kind === "json") {
+			const runtime = runtimeValue(part.value);
+			if (runtime) events.push({ type: "runtime.updated", sessionId: input.event.sessionId, turnId: input.event.turnId, runtime, at: input.event.time });
+		}
 	}
 
 	return events;
@@ -293,6 +308,8 @@ function getItemParts(value: unknown): DashboardItemPart[] {
 			const text = getStringObjectValue(part, "text");
 			if (text !== undefined) parts.push({ kind, text, stream: getLogStreamValue(part.stream) });
 		}
+
+		if (kind === "json") parts.push({ kind, value: part.value });
 	}
 
 	return parts;
@@ -300,7 +317,28 @@ function getItemParts(value: unknown): DashboardItemPart[] {
 
 function getNumberObjectValue(object: Record<string, unknown>, key: string): number | undefined {
 	const value = object[key];
-	return typeof value === "number" ? value : undefined;
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function runtimeValue(value: unknown): DashboardRuntimeStatus | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	if (record.type !== "runtime") return undefined;
+	const usage = getObjectValue(record.usage);
+	const modelValue = getObjectValue(record.model);
+	const model = modelValue ? { provider: getStringObjectValue(modelValue, "provider"), id: getStringObjectValue(modelValue, "id") } : undefined;
+	const runtime = {
+		model: model && (model.provider || model.id) ? model : undefined,
+		contextTokens: usage && getNumberObjectValue(usage, "contextTokens"),
+		contextWindow: usage && getNumberObjectValue(usage, "contextWindow"),
+		reasoningLevel: getStringObjectValue(record, "thinkingLevel"),
+		reasoningTokens: usage && getNumberObjectValue(usage, "reasoning"),
+	};
+	return Object.values(runtime).some((item) => item !== undefined) ? runtime : undefined;
+}
+
+function getObjectValue(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
 function getLevelValue(value: unknown): "info" | "warning" | "error" | undefined {

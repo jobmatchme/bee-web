@@ -12,8 +12,8 @@
 			"description": "Fabee BI/dbt Agent",
 			"worker": {
 				"subject": "fabee.agent.pi.default",
-				"timeoutMs": 120000,
-				"eventTimeoutMs": 120000
+				"timeoutMs": 600000,
+				"eventTimeoutMs": 600000
 			},
 			"session": {
 				"agentId": "fabee-pi-agent",
