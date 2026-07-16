@@ -581,21 +581,17 @@ export function createWebGatewayServer(config: WebGatewayConfig, options: Create
 			}
 
 			if (method === "POST" && sessionEndpoint.action === "archive") {
-				if (
-					!access.upstreamSession ||
-					!options.sessionApi ||
-					options.canArchive?.(sessionEndpoint.sessionId) === false
-				) {
-					sendJson(res, access.upstreamSession && options.sessionApi ? 409 : 404, {
-						error:
-							access.upstreamSession && options.sessionApi
-								? "Session has active or queued runs"
-								: "Session not found",
-					});
+				if (options.canArchive?.(sessionEndpoint.sessionId) === false) {
+					sendJson(res, 409, { error: "Session has active or queued runs" });
 					return;
 				}
 				try {
-					await options.sessionApi.archiveSession(sessionEndpoint.sessionId, access.user.email);
+					if (access.upstreamSession && options.sessionApi) {
+						await options.sessionApi.archiveSession(sessionEndpoint.sessionId, access.user.email);
+					} else {
+						sessions.delete(sessionEndpoint.sessionId);
+						for (const key of artifacts.keys()) if (key.startsWith(`${sessionEndpoint.sessionId}\0`)) artifacts.delete(key);
+					}
 					fanout.closeSession(sessionEndpoint.sessionId);
 					sendJson(res, 202, { archived: true });
 				} catch (error) {
